@@ -1,0 +1,6 @@
+#!/bin/sh  
+while true  
+do  
+scp -r data/test_1k/* glebs@sadigh-ws-1.stanford.edu:/scr/glebs/dev/upn/data/fetch/reach/test_1k/* 
+sleep 300  
+done
