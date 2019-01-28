@@ -15,7 +15,7 @@ import pickle
 import multiprocessing
 from multiprocessing import Process
 
-from real_camera import *#
+from real_camera import *
 #from record_saver import *
 
 
@@ -26,7 +26,7 @@ from std_msgs.msg import String
 
 import roslib
 roslib.load_manifest('joint_listener')
-from joint_listener.srv import *
+from joint_listener.srv import ReturnJointStates, ReturnEEPose
 import moveit_commander
 from tf.transformations import quaternion_from_euler,euler_from_quaternion
 
@@ -34,11 +34,10 @@ from gripper_client import *
 from shell import *
 
 import glob
-import random
 from PIL import Image
 
 from moveit import *
-joint_names = ["torso_lift_joint", "shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint", "elbow_flex_joint", "forearm_roll_joint", "wrist_flex_joint", "wrist_roll_joint"]
+
 
 scale_control = 0.5
 
@@ -50,7 +49,7 @@ parser.add_argument('--saveinterval')
 parser.add_argument('--savepath')
 parser.add_argument('--port')
 parser.add_argument('--startepisode')
-
+joint_names = ["torso_lift_joint", "shoulder_pan_joint", "shoulder_lift_joint", "upperarm_roll_joint", "elbow_flex_joint", "forearm_roll_joint", "wrist_flex_joint", "wrist_roll_joint"]
         
 
 def start_data_collection(episodes, timesteps, saveinterval, save_path,port, startepisode, camera):
@@ -60,16 +59,8 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
     rate = rospy.Rate(2)
 
     moveit = MoveIt()
-
     moveit.get_ee_bounds(fixed=True)
-
-    # if not good_bounds:
-    #    return
-    max_torso_height()
     moveit.get_start_point(fixed=True)
-
-    # if not good_start:
-    #    return   
 
     start_time = -1
 
@@ -83,37 +74,32 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
 
     episode = 0
 
-
-
     while episode < episodes:
-    	#THIS IS SPECIFICALLY FOR THE PUSHING DATASET
-    	r_number = random.random()
-    	if(r_number < 1):
-    		random_start = False
-    		corner_start = False
-    	else:
-    		random_start = True
-    		corner_start = False
-        #moveit.trace_perimeter()
-        #if (episode +1 ) % 5 == 0:
-        #    moveit.shuffle_reset()
+        #moveit.shuffle_reset()
         while moveit.not_at_start():
-            moveit.go_to_start(rand=random_start, corner=corner_start)
             time.sleep(1)
+            moveit.go_to_start()
 
+        red_pose = moveit.make_new_pose(0.5,0.23)
+        tan_pose = moveit.make_new_pose(0.5,-0.23)
+        goal_pose = moveit.make_new_pose(0.7,0.1)
+
+        #FIRST REAL TRAJ: go to red object then to goal
+        #fixed_goals = [red_pose,goal_pose]
+        #FAKE TRAJ 1: go to tan object then to goal
+        #fixed_goals = [tan_pose,goal_pose]
+        #FAKEST TRAJ: just go to goal
+        fixed_goals = [goal_pose,goal_pose]
         images = []
         actions = []
         vel_actions = []
         qts = []
         ee_qts = []
         
-        move_gripper(1)
-        if episode % 20 == 0:
-            max_torso_height()
+        #move_gripper(1)
         #moveit.shuffle_reset()
         #moveit.trace_perimeter()\
-        true_start =  int(startepisode) + int(episode)
-        print("Starting episode %d" % true_start)
+        print("Starting episode %d" % episode)
 
         no_errors = True
 
@@ -121,6 +107,11 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
 
         for timestep in range(timesteps):
             print(timestep)
+
+            if timestep < 5:
+                fixed_goal=fixed_goals[0]
+            else:
+                fixed_goal=fixed_goals[1]
 
             if not moveit.not_at_start():
                 print("Still at start!")
@@ -138,7 +129,8 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
             elif current_pose.position.y > moveit.upper_point.position.y:
                 twist_command = new_twist_command(y=-scale_control)
             else:
-              twist_command = random_twist_command()
+              #twist_command = random_twist_command()
+              twist_command = fixed_twist_command(moveit,fixed_goal)
 
             image = None
             while image is None:
@@ -146,15 +138,11 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
                 current_pose = moveit.get_ee_pose()
                 ee_vel = [twist_command.twist.linear.x, twist_command.twist.linear.y, twist_command.twist.linear.z]
                 ee_pos = [current_pose.position.x, current_pose.position.y, current_pose.position.z]
-
-            #DEBUG
-            #image = np.zeros((100,100,3))
-            # print("Captured image for %d" % timestep)
-            # im = Image.fromarray(image[...,[2,1,0]])
-            # im.save(save_path + '/images/raw_images/' + str(timestep) + '.jpeg')
             
+            pub.publish(twist_command)
+            rate.sleep()
 
-            if current_pose.position.z < 0.92 or current_pose.position.z > 1:
+            if current_pose.position.z < 0.94 or current_pose.position.z > 1:
                 print(current_pose.position.z)
                 print("Z bounds violated, restarting episode")
                 total_errors += 1
@@ -173,12 +161,6 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
                 vel_actions.append(velocity)
                 qts.append(position)
                 ee_qts.append(ee_pos)
-
-            position, _, _ = get_joint_states()
-            #publish the command, then get your current vel, append all your info, then sleep
-            pub.publish(twist_command)
-            _, velocity, _ = get_joint_states()
-            rate.sleep()
 
             twist_command = new_twist_command()
             pub.publish(twist_command)
@@ -227,15 +209,28 @@ def start_data_collection(episodes, timesteps, saveinterval, save_path,port, sta
     del all_ee_qts
 
     camera.close()
-    print("Total errors: %d" % total_errors)
+
+
+def random_valid_point(moveit):
+
+    x = npr.uniform(low=moveit.lower_x, high=moveit.upper_x)
+    y = npr.uniform(low=moveit.lower_y, high=moveit.upper_y)
+    z = moveit.height
+
+    point = Point(x, y, z)
+    pose = Pose(position=point, orientation=upright)
+
+    return pose
+
+
 
 def random_twist_command():
-    control = npr.uniform(low=-.3, high=scale_control, size=(2))
+    control = npr.uniform(low=-scale_control, high=scale_control, size=(2))
     twist = TwistStamped()
 
     twist.header.frame_id = 'base_link'
-    twist.twist.linear.x = npr.uniform(low=-.3, high=scale_control)
-    twist.twist.linear.y = npr.uniform(low=-scale_control, high=scale_control)
+    twist.twist.linear.x = control[0]
+    twist.twist.linear.y = control[1]
     twist.twist.linear.z = 0
 
     return twist
@@ -254,12 +249,14 @@ def new_twist_command(x=0, y=0, z=0):
 def fixed_twist_command(moveit, fixed_pose):
     twist = TwistStamped()
 
+    scale = 5.0
+
     current_pose = moveit.get_ee_pose()
 
     twist.header.frame_id = 'base_link'
-    twist.twist.linear.x = fixed_pose.position.x - current_pose.position.x
-    twist.twist.linear.y = fixed_pose.position.y - current_pose.position.y
-    twist.twist.linear.z = fixed_pose.position.z - current_pose.position.z
+    twist.twist.linear.x = (fixed_pose.position.x - current_pose.position.x) * scale
+    twist.twist.linear.y = (fixed_pose.position.y - current_pose.position.y) * scale
+    twist.twist.linear.z = (fixed_pose.position.z - current_pose.position.z) * scale
 
     return twist
 
@@ -276,17 +273,6 @@ def get_joint_states():
             print("joint %s not found!"%joint_name)
     return (np.array(resp.position), np.array(resp.velocity), np.array(resp.effort))
 
-
-def max_torso_height():
-    rospy.wait_for_service("send_torso_height")
-    try:
-        s = rospy.ServiceProxy("/send_torso_height", SendTorsoHeight)
-        resp = s(0.37)
-    except rospy.ServiceException:
-        print("error when calling send_torso_height")
-        sys.exit(1)
-
-    return resp
 
 def main(episodes, timesteps, saveinterval, save_path,port, startepisode):
 
